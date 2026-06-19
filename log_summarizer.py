@@ -30,16 +30,6 @@ if not DISCORD_WEBHOOK_URL:
 OLLAMA_URL   = "http://100.104.76.52:11434/api/generate"
 OLLAMA_MODEL = "deepseek-r1:1.5b"
 
-CONTAINERS = [
-    "n8n",
-    "alertmanager",
-    "prometheus",
-    "grafana",
-    "adguardhome",
-    "npm-app-1",
-    "cadvisor",
-]
-
 # Keywords that trigger AI analysis
 ESCALATE_KEYWORDS = [
     "fatal",
@@ -82,6 +72,18 @@ IGNORE_PATTERNS = [
     "enabled metrics:",                 # cadvisor startup — contains 'oom_event' in list
 ]
 
+def get_running_containers():
+    """Auto-discover running containers instead of hardcoding."""
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=10
+        )
+        return [c.strip() for c in result.stdout.splitlines() if c.strip()]
+    except Exception as e:
+        print("Error listing containers: " + str(e))
+        return []
+    
 def get_container_logs(container, lines=30):
     try:
         result = subprocess.run(
@@ -94,19 +96,13 @@ def get_container_logs(container, lines=30):
         return "Error: " + str(e)
 
 def should_analyze(logs):
-    """Rules-based triage. Returns (needs_analysis, matched_keyword)."""
-    logs_lower = logs.lower()
-
-    # Check ignore patterns first
-    for pattern in IGNORE_PATTERNS:
-        if pattern in logs_lower:
-            logs_lower = logs_lower.replace(pattern, "")
-
-    # Check escalate keywords on cleaned logs
-    for keyword in ESCALATE_KEYWORDS:
-        if keyword in logs_lower:
-            return True, keyword
-
+    """Line-by-line triage. Returns (needs_analysis, matched_keyword)."""
+    for line in logs.lower().splitlines():
+        if any(pattern in line for pattern in IGNORE_PATTERNS):
+            continue
+        for keyword in ESCALATE_KEYWORDS:
+            if keyword in line:
+                return True, keyword
     return False, None
 
 def analyze_with_ai(container, logs, trigger_keyword):
@@ -133,7 +129,7 @@ def analyze_with_ai(container, logs, trigger_keyword):
                     "num_ctx": 1024,
                 }
             },
-            timeout=300
+            timeout=120
         )
         resp.raise_for_status()
         raw = resp.json().get("response", "").strip()
@@ -165,7 +161,7 @@ def send_discord_alert(container, trigger_keyword, analysis_result):
                 {"name": "Severity",         "value": severity.upper(),               "inline": True},
                 {"name": "Trigger keyword",  "value": "`" + trigger_keyword + "`",    "inline": False},
                 {"name": "AI Analysis",      "value": analysis_result.get("analysis", ""), "inline": False},
-                {"name": "Time",             "value": datetime.now().strftime("%Y-%m-%d %H:%M:%S CST"), "inline": False},
+                {"name": "Time",             "value": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z"), "inline": False},
             ],
             "footer": {"text": "pbalab · rules triage + DeepSeek-R1 1.5B · Oracle Cloud"}
         }]
@@ -181,8 +177,8 @@ def send_discord_alert(container, trigger_keyword, analysis_result):
 def main():
     print("\n[" + datetime.now().strftime("%H:%M:%S") + "] Log analysis starting...")
     escalated = 0
-
-    for container in CONTAINERS:
+    containers = get_running_containers()
+    for container in containers:
         print("\n  [" + container + "]")
         logs = get_container_logs(container)
         needs_analysis, keyword = should_analyze(logs)
@@ -199,7 +195,7 @@ def main():
         send_discord_alert(container, keyword, result)
         escalated += 1
 
-    print("\n  Done. " + str(escalated) + "/" + str(len(CONTAINERS)) + " escalated.")
+    print("\n  Done. " + str(escalated) + "/" + str(len(containers)) + " escalated.")
 
 if __name__ == "__main__":
     main()
