@@ -1,0 +1,8 @@
+# Secrets — never commit
+.summarizer_env
+*.env
+.summarizer_state.json
+
+# Python
+__pycache__/
+*.pyc
